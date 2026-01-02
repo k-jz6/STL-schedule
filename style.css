@@ -521,26 +521,34 @@ button {
 
 .total-row {
     display: grid;
-    height: 28px;
+    /* heightは指定せず中身(セル)に合わせる */
     background: #fff;
-    /* 背景はセルで制御するため白に */
-    border-top: 2px solid var(--border);
     margin-top: auto;
     width: fit-content;
     min-width: 100%;
+    position: relative;
+    z-index: 20;
 }
 
 .total-cell {
     border-right: 1px solid var(--border);
-    text-align: center;
+
+    /* 高さ28pxの中に上下の線を含める(box-sizing:border-box) */
+    height: 28px;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-size: 11px;
     font-weight: bold;
-    line-height: 28px;
     color: #333;
     background: #fff;
+
+    /* 上下の線をセル自体に定義 */
+    border-top: 2px solid var(--border);
+    border-bottom: 1px solid var(--border);
 }
 
-/* 【修正】合計行の背景色対応 */
 .total-cell.weekend {
     background: var(--weekend-bg);
 }
@@ -564,6 +572,7 @@ button {
 .segment-label.selected {
     border-color: var(--accent);
     background: #eff6ff;
+    z-index: 50;
 }
 
 .segment.progress-active {
