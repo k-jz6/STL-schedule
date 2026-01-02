@@ -21,7 +21,6 @@
 
             <div style="flex-grow:1"></div>
             <button id="downloadBtn" class="btn-secondary" type="button">💾 ファイルに保存</button>
-            <button id="clearAllBtn" class="btn-secondary" type="button">✨ 新規開始</button>
             <button id="uploadBtn" class="btn-secondary" type="button">📂 ファイルを開く</button>
             <input type="file" id="fileInput" accept=".json" />
         </div>
@@ -100,6 +99,12 @@
             <label>終了日 <input id="settingsEndDate" type="date" /></label>
             <label>会社休日 (YYYY-MM-DD)<textarea id="settingsHolidays"
                     placeholder="2025-01-01, 2025-12-31"></textarea></label>
+
+            <hr style="border: none; border-top: 1px solid #eee; margin: 16px 0;">
+
+            <button id="clearAllBtn" class="btn-secondary" type="button"
+                style="width: 100%; color: #ef4444; border-color: #fca5a5;">✨ 新規開始 (データをクリア)</button>
+
             <div class="settings-buttons">
                 <button id="settingsCancel" class="btn-secondary" type="button">キャンセル</button>
                 <button id="settingsSave" class="btn-primary" type="button">保存</button>

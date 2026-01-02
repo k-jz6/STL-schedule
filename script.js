@@ -249,7 +249,6 @@ function buildHeader() {
         headerRow.appendChild(c);
     });
 
-    // 合計行の初期化 【修正】色付けロジック追加
     totalRow.innerHTML = "";
     totalRow.style.gridTemplateColumns = `repeat(${total}, ${CELL_WIDTH}px)`;
     timelineDays.forEach((d) => {
@@ -911,26 +910,20 @@ function handleCellClick(task, dayIndex) {
     let sStr = task.pendingStartDate, eStr = dateStr;
     if (sStr > eStr) [sStr, eStr] = [eStr, sStr];
 
-    // 【修正】ここから重複チェック (1日あたり最大3つまで = 重複が3つ未満ならOK)
     const pendingStartIdx = dateToIndex(sStr);
     const pendingEndIdx = dateToIndex(eStr);
 
-    // 指定区間の全ての日付について、既存のセグメントがいくつ重なっているか確認
     for (let i = pendingStartIdx; i <= pendingEndIdx; i++) {
         const checkIso = timelineDays[i].iso;
         let count = 0;
         task.segments.forEach(seg => {
-            // 対象日がそのセグメントの期間内ならカウント
-            // (ポイントは s=e なので期間チェックでOK)
             if (checkIso >= seg.startDate && checkIso <= seg.endDate) {
                 count++;
             }
         });
 
-        // すでに3つ重なっている日があるなら、これ以上追加できない
         if (count >= 3) {
             alert("1日あたりの重複は最大3つまでです。");
-            // キャンセル扱いにする
             task.pendingStartDate = null;
             task.pendingStartIndex = null;
             renderAllSegments();
@@ -1027,6 +1020,8 @@ function setupControlEvents() {
             selectedSegments = [];
             activeProgressSegmentId = null;
             triggerSave();
+            // 【修正】ここで設定パネルを閉じる
+            settingsPanel.classList.add("settings-hidden");
         }
     });
 
