@@ -62,6 +62,17 @@ const DataManager = {
 const CELL_WIDTH = 28;
 const BASE_ROW_HEIGHT = 52;
 const SEGMENT_OFFSET_Y = 44;
+
+// 【対策 CWE-400】リソース枯渇(無限入力)防止のための制限設定
+// ユーザー要望に基づき調整済み
+const LIMITS = {
+    TEXT: 100,          // 項目名・ラベル（100文字）
+    MEMO: 5000,         // メモ欄（5000文字）
+    PROJECT_NAME: 50,   // 計画名（50文字）
+    TASKS_MAX: 500,     // タスク行数（500行）
+    SEGMENTS_MAX: 360   // 1タスクあたりのセグメント数（1年分想定で360個）
+};
+
 const now = new Date();
 const todayISO = dateToISO(now);
 const defaultStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -122,19 +133,35 @@ function dateToIndex(str) { return timelineDays.findIndex((d) => d.iso === str);
 function isSegmentSelected(taskId, segId) { return selectedSegments.some((s) => s.taskId === taskId && s.segId === segId); }
 function centerX(index) { return index * CELL_WIDTH + CELL_WIDTH / 2; }
 
+// 【対策 CWE-400】文字列切り詰めヘルパー
+function truncate(str, max) {
+    if (typeof str !== 'string') return "";
+    return str.length > max ? str.substring(0, max) : str;
+}
+
+// 【対策 CWE-20】日付形式チェック
+function isValidDateISO(str) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(Date.parse(str));
+}
+
 // --- データ同期 & 保存 ---
 function syncDataModel() {
+    // 保存前に現在のDOMからデータを吸い上げる際も制限を適用
     appData.tasks = taskObjects.map(t => ({
         id: t.id,
-        label1: t.leftRowEl.children[1].firstElementChild.textContent,
-        label2: t.leftRowEl.children[2].firstElementChild.textContent,
-        label3: t.leftRowEl.children[3].firstElementChild.textContent,
-        segments: t.segments,
+        label1: truncate(t.leftRowEl.children[1].firstElementChild.textContent, LIMITS.TEXT),
+        label2: truncate(t.leftRowEl.children[2].firstElementChild.textContent, LIMITS.TEXT),
+        label3: truncate(t.leftRowEl.children[3].firstElementChild.textContent, LIMITS.TEXT),
+        segments: t.segments.map(s => ({
+            ...s,
+            label: truncate(s.label, LIMITS.TEXT)
+        })),
         isDone: t.isDone || false,
         isHidden: t.isHidden || false
     }));
-    appData.memo = freeMemo.innerHTML;
-    appData.projectName = projectNameInput.value;
+    
+    appData.memo = truncate(freeMemo.innerText, LIMITS.MEMO);
+    appData.projectName = truncate(projectNameInput.value, LIMITS.PROJECT_NAME);
 }
 
 function triggerSave() {
@@ -144,10 +171,18 @@ function triggerSave() {
 }
 
 projectNameInput.addEventListener("input", () => {
+    // UI上での即時制限
+    if (projectNameInput.value.length > LIMITS.PROJECT_NAME) {
+        projectNameInput.value = projectNameInput.value.substring(0, LIMITS.PROJECT_NAME);
+    }
     document.title = projectNameInput.value + " | 工程表";
     triggerSave();
 });
-freeMemo.addEventListener("input", triggerSave);
+freeMemo.addEventListener("input", () => {
+    // メモ欄は長いため、入力中の厳密な制限はUXを損なう可能性があるため
+    // 厳密なカットは保存時(syncDataModel)に任せるが、念のため長すぎる場合は警告などを出す実装も可能
+    triggerSave();
+});
 
 // --- 初期化 ---
 async function initializeApp() {
@@ -162,22 +197,99 @@ async function initializeApp() {
         scrollToToday();
         document.title = appData.projectName + " | 工程表";
     }
+    setupPasteSanitization();
     setupControlEvents();
 }
 
 function restoreFromData(data) {
-    appData = data;
-    if (!data.settings.startDate) {
-        appData.settings.startDate = dateToISO(defaultStart);
-        appData.settings.endDate = dateToISO(defaultEnd);
+    // 【対策 CWE-1321 & CWE-400】
+    // ホワイトリスト方式で、必要なデータのみを型チェック・長さ制限しながら復元
+    
+    if (!data || typeof data !== 'object') {
+        alert("データ形式が無効です。初期状態で開始します。");
+        return;
     }
 
-    const restoredName = data.projectName || "標準の計画";
-    projectNameInput.value = restoredName;
-    document.title = restoredName + " | 工程表";
+    const safeSettings = {
+        startDate: isValidDateISO(data.settings?.startDate) ? data.settings.startDate : dateToISO(defaultStart),
+        endDate: isValidDateISO(data.settings?.endDate) ? data.settings.endDate : dateToISO(defaultEnd),
+        holidays: Array.isArray(data.settings?.holidays) 
+            ? data.settings.holidays.filter(h => isValidDateISO(h)).slice(0, 3650) // 最大10年分程度に制限
+            : []
+    };
 
-    if (data.memo) freeMemo.innerHTML = data.memo;
+    const safeProjectName = truncate(data.projectName || "標準の計画", LIMITS.PROJECT_NAME);
+    const safeMemo = truncate(data.memo || "", LIMITS.MEMO);
 
+    const safeTasks = [];
+    if (Array.isArray(data.tasks)) {
+        // タスク数の上限チェック
+        const taskCount = Math.min(data.tasks.length, LIMITS.TASKS_MAX);
+        
+        for (let i = 0; i < taskCount; i++) {
+            const t = data.tasks[i];
+            if (!t || typeof t !== 'object') continue;
+
+            const safeSegments = [];
+            if (Array.isArray(t.segments)) {
+                // セグメント数の上限チェック
+                const segCount = Math.min(t.segments.length, LIMITS.SEGMENTS_MAX);
+                for (let j = 0; j < segCount; j++) {
+                    const s = t.segments[j];
+                    if (!s) continue;
+                    
+                    // 日付の妥当性チェック
+                    if (!isValidDateISO(s.startDate) || !isValidDateISO(s.endDate)) continue;
+
+                    // 工数(dailyValues)のサニタイズ
+                    const safeDailyValues = {};
+                    if (s.dailyValues && typeof s.dailyValues === 'object') {
+                        Object.keys(s.dailyValues).forEach(k => {
+                            if (isValidDateISO(k)) {
+                                const val = parseFloat(s.dailyValues[k]);
+                                if (!isNaN(val) && val >= 0 && val <= 24) { // 妥当な工数範囲
+                                    safeDailyValues[k] = val;
+                                }
+                            }
+                        });
+                    }
+
+                    safeSegments.push({
+                        id: String(s.id || Math.random()), 
+                        startDate: s.startDate,
+                        endDate: s.endDate,
+                        type: s.type === 'point' ? 'point' : 'range',
+                        label: truncate(s.label, LIMITS.TEXT),
+                        progressEndDate: isValidDateISO(s.progressEndDate) ? s.progressEndDate : null,
+                        dailyValues: safeDailyValues
+                    });
+                }
+            }
+
+            safeTasks.push({
+                id: String(t.id || "task_" + Math.random()),
+                label1: truncate(t.label1, LIMITS.TEXT),
+                label2: truncate(t.label2, LIMITS.TEXT),
+                label3: truncate(t.label3, LIMITS.TEXT),
+                segments: safeSegments,
+                isDone: !!t.isDone,
+                isHidden: !!t.isHidden
+            });
+        }
+    }
+
+    appData = {
+        projectName: safeProjectName,
+        settings: safeSettings,
+        tasks: safeTasks,
+        memo: safeMemo
+    };
+
+    projectNameInput.value = appData.projectName;
+    document.title = appData.projectName + " | 工程表";
+    freeMemo.innerText = appData.memo; // XSS対策
+
+    // DOM再構築
     leftRowsContainer.innerHTML = "";
     rowsContainer.innerHTML = "";
     taskObjects = [];
@@ -185,7 +297,7 @@ function restoreFromData(data) {
     buildTimeline();
     buildHeader();
 
-    if (appData.tasks && appData.tasks.length > 0) {
+    if (appData.tasks.length > 0) {
         appData.tasks.forEach(tData => addTaskRow(tData));
     } else {
         addTaskRow();
@@ -208,7 +320,9 @@ function buildTimeline() {
     const endDt = isoToDate(appData.settings.endDate);
     const curr = new Date(startDt);
 
-    while (curr <= endDt) {
+    // 【対策 CWE-400】ループ暴走防止 (約10年分)
+    let safeGuard = 0;
+    while (curr <= endDt && safeGuard < 3660) {
         const iso = dateToISO(curr);
         const dow = curr.getDay();
         timelineDays.push({
@@ -224,6 +338,7 @@ function buildTimeline() {
             isToday: iso === todayISO
         });
         curr.setDate(curr.getDate() + 1);
+        safeGuard++;
     }
     updateRangeLabel();
 }
@@ -239,13 +354,24 @@ function buildHeader() {
     headerRow.innerHTML = "";
     const total = timelineDays.length;
     headerRow.style.gridTemplateColumns = `repeat(${total}, ${CELL_WIDTH}px)`;
+    
     timelineDays.forEach((d) => {
         const c = document.createElement("div");
         c.className = "header-day";
         if (d.isWeekend) c.classList.add("weekend");
         if (d.isHoliday) c.classList.add("holiday");
         if (d.isToday) c.classList.add("today");
-        c.innerHTML = `<div class="header-day-num">${d.month}/${d.day}</div><div class="header-day-week">${WEEKDAYS[d.dow]}</div>`;
+        
+        const numDiv = document.createElement("div");
+        numDiv.className = "header-day-num";
+        numDiv.textContent = `${d.month}/${d.day}`;
+        
+        const weekDiv = document.createElement("div");
+        weekDiv.className = "header-day-week";
+        weekDiv.textContent = WEEKDAYS[d.dow];
+        
+        c.appendChild(numDiv);
+        c.appendChild(weekDiv);
         headerRow.appendChild(c);
     });
 
@@ -296,6 +422,12 @@ function refreshRowsDOM() {
 }
 
 function addTaskRow(initialData = null) {
+    // 【対策】タスク数上限チェック
+    if (!initialData && taskObjects.length >= LIMITS.TASKS_MAX) {
+        alert("タスク数の上限に達しました。");
+        return;
+    }
+
     const id = initialData ? initialData.id : "task_" + Date.now() + "_" + Math.random().toString(36).slice(2);
     const total = timelineDays.length;
 
@@ -832,9 +964,10 @@ function addSegEvents(el, task, seg) {
 
 function editSegmentLabel(task, segId) {
     const seg = task.segments.find(s => s.id === segId);
+    // promptも長い入力の攻撃対象になりうるためカット
     const nl = window.prompt("ラベル:", seg.label || "");
     if (nl === null) return;
-    seg.label = nl.trim();
+    seg.label = truncate(nl.trim(), LIMITS.TEXT);
     renderAllSegments(); triggerSave();
 }
 
@@ -912,6 +1045,15 @@ function handleCellClick(task, dayIndex) {
 
     const pendingStartIdx = dateToIndex(sStr);
     const pendingEndIdx = dateToIndex(eStr);
+    
+    // 【対策 CWE-400】セグメント数上限チェック
+    if (task.segments.length >= LIMITS.SEGMENTS_MAX) {
+        alert("1行あたりの区間数が上限に達しました。");
+        task.pendingStartDate = null;
+        task.pendingStartIndex = null;
+        renderAllSegments();
+        return;
+    }
 
     for (let i = pendingStartIdx; i <= pendingEndIdx; i++) {
         const checkIso = timelineDays[i].iso;
@@ -931,7 +1073,8 @@ function handleCellClick(task, dayIndex) {
         }
     }
 
-    const label = prompt("区間ラベル（任意）", "") || "";
+    const labelRaw = prompt("区間ラベル（任意）", "") || "";
+    const label = truncate(labelRaw, LIMITS.TEXT); // 入力制限
     const type = sStr === eStr ? "point" : "range";
     const segId = "seg_" + Math.random().toString(36).slice(2);
     task.segments.push({ id: segId, startDate: sStr, endDate: eStr, type, label, progressEndDate: null, dailyValues: {} });
@@ -957,6 +1100,7 @@ function setupRowInteraction(task) {
 
 document.getElementById("downloadBtn").addEventListener("click", () => {
     syncDataModel();
+    // ファイル名サニタイズ（OSコマンドインジェクション等はここで発生しないが、使い勝手として特殊文字排除）
     const rawProjectName = appData.projectName.replace(/[^\w\u3040-\u30ff\u30a0-\u30ff\u30fc\u4e00-\u9faf\uff10-\uff19]+/g, '_');
     const sanitizedName = rawProjectName.replace(/_+/g, '_').replace(/^_|_$/g, '');
     const timestamp = formatTimestamp(new Date());
@@ -973,14 +1117,31 @@ const fileInput = document.getElementById("fileInput");
 document.getElementById("uploadBtn").addEventListener("click", () => { fileInput.click(); });
 fileInput.addEventListener("change", (e) => {
     const file = e.target.files[0]; if (!file) return;
+
+    // 【対策 CWE-434】ファイルタイプチェック
+    if (!file.name.toLowerCase().endsWith(".json")) {
+        alert("JSONファイルのみ読み込めます。");
+        fileInput.value = "";
+        return;
+    }
+    if (file.type && file.type !== "application/json") {
+        alert("ファイル形式が正しくありません。");
+        fileInput.value = "";
+        return;
+    }
+
     const reader = new FileReader();
     reader.onload = (evt) => {
         try {
             const data = JSON.parse(evt.target.result);
+            // 【対策 CWE-20】必須プロパティの存在チェック
+            if (!data || typeof data !== 'object' || !Array.isArray(data.tasks)) {
+                throw new Error("無効なファイル形式です");
+            }
             if (confirm("データを上書きして読み込みますか？")) {
                 restoreFromData(data); triggerSave(); alert("読み込み完了");
             }
-        } catch (err) { alert("読み込み失敗"); }
+        } catch (err) { alert("読み込み失敗: ファイルが破損しているか形式が異なります。"); }
         fileInput.value = "";
     };
     reader.readAsText(file);
@@ -1004,10 +1165,23 @@ function setupControlEvents() {
 
     document.getElementById("settingsSave").addEventListener("click", () => {
         if (!confirm("期間を変更しますか？")) return;
-        appData.settings.startDate = document.getElementById("settingsStartDate").value;
-        appData.settings.endDate = document.getElementById("settingsEndDate").value;
+        const newStart = document.getElementById("settingsStartDate").value;
+        const newEnd = document.getElementById("settingsEndDate").value;
+        
+        // 【対策 CWE-20】日付妥当性チェック
+        if (!isValidDateISO(newStart) || !isValidDateISO(newEnd)) {
+            alert("日付形式が正しくありません。");
+            return;
+        }
+
+        appData.settings.startDate = newStart;
+        appData.settings.endDate = newEnd;
+        
         const hText = document.getElementById("settingsHolidays").value.trim();
-        appData.settings.holidays = hText ? hText.split(",").map(s => s.trim()).filter(s => s) : [];
+        appData.settings.holidays = hText 
+            ? hText.split(",").map(s => s.trim()).filter(s => isValidDateISO(s)) 
+            : [];
+            
         settingsPanel.classList.add("settings-hidden");
         restoreFromData(appData); triggerSave();
     });
@@ -1020,7 +1194,6 @@ function setupControlEvents() {
             selectedSegments = [];
             activeProgressSegmentId = null;
             triggerSave();
-            // 【修正】ここで設定パネルを閉じる
             settingsPanel.classList.add("settings-hidden");
         }
     });
@@ -1052,6 +1225,17 @@ function setupControlEvents() {
     document.getElementById("addRowBtn").addEventListener("click", () => addTaskRow());
 }
 
+// 【対策 CWE-79 (セルフXSS)】ペースト時にプレーンテキストのみを許可する
+function setupPasteSanitization() {
+    document.addEventListener('paste', (e) => {
+        if (e.target.isContentEditable) {
+            e.preventDefault();
+            const text = (e.clipboardData || window.clipboardData).getData('text');
+            document.execCommand('insertText', false, text);
+        }
+    });
+}
+
 function createBlankAppData() {
     return {
         projectName: "新しい計画",
@@ -1075,7 +1259,6 @@ function modifySelected(modifierFunc) {
     });
     renderAllSegments(); triggerSave();
 }
-
 
 window.addEventListener("resize", renderAllSegments);
 initializeApp();

@@ -761,3 +761,52 @@ button {
     background: var(--border);
     margin: 4px 0;
 }
+
+.file-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap; /* 画面が狭い時に折り返す設定 */
+}
+
+/* 1. グループ（ラベル＋入力欄）の設定 */
+.project-name-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    
+    /* 画面が広いときは伸びるようにする */
+    flex-grow: 1;
+    
+    /* グループ自体の幅制限は撤廃し、中身（入力欄）のサイズに任せる */
+    flex-shrink: 0;
+}
+
+/* 2. 入力欄（白い箱）の設定 */
+#projectNameInput {
+    /* 親要素いっぱいに広げる */
+    width: 100%;
+    
+    /* 【修正】入力欄単体で 450px を強制確保 */
+    /* 計算式: 14px × 25文字 = 350px。余裕を見て +100px */
+    min-width: 450px;
+    
+    padding: 6px 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    
+    /* 念のためフォントサイズを明示（ブラウザ依存を防ぐ） */
+    font-size: 14px; 
+}
+
+/* 3. スマホ対応（画面幅600px以下） */
+@media (max-width: 600px) {
+    /* スマホでは固定幅を解除し、画面幅に合わせる */
+    .project-name-group {
+        width: 100%;
+    }
+    #projectNameInput {
+        min-width: 0; /* 強制幅を解除 */
+        width: 100%;
+    }
+}
