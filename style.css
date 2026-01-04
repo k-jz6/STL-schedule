@@ -521,32 +521,25 @@ button {
 
 .total-row {
     display: grid;
-    /* heightは指定せず中身(セル)に合わせる */
+    height: 28px;
     background: #fff;
+    border-top: 2px solid var(--border);
+    /* 【追加】下線を追加 */
+    border-bottom: 1px solid var(--border);
     margin-top: auto;
     width: fit-content;
     min-width: 100%;
-    position: relative;
-    z-index: 20;
 }
 
 .total-cell {
     border-right: 1px solid var(--border);
-
-    /* 高さ28pxの中に上下の線を含める(box-sizing:border-box) */
-    height: 28px;
-
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    text-align: center;
     font-size: 11px;
     font-weight: bold;
+    /* 【修正】28px(高さ) - 2px(上線) - 1px(下線) = 25px */
+    line-height: 25px;
     color: #333;
     background: #fff;
-
-    /* 上下の線をセル自体に定義 */
-    border-top: 2px solid var(--border);
-    border-bottom: 1px solid var(--border);
 }
 
 .total-cell.weekend {
@@ -744,10 +737,6 @@ button {
     gap: 8px;
 }
 
-.menu-item:hover {
-    background: #f3f4f6;
-}
-
 .menu-item.delete {
     color: #ef4444;
 }
@@ -760,53 +749,4 @@ button {
     height: 1px;
     background: var(--border);
     margin: 4px 0;
-}
-
-.file-controls {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap; /* 画面が狭い時に折り返す設定 */
-}
-
-/* 1. グループ（ラベル＋入力欄）の設定 */
-.project-name-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    
-    /* 画面が広いときは伸びるようにする */
-    flex-grow: 1;
-    
-    /* グループ自体の幅制限は撤廃し、中身（入力欄）のサイズに任せる */
-    flex-shrink: 0;
-}
-
-/* 2. 入力欄（白い箱）の設定 */
-#projectNameInput {
-    /* 親要素いっぱいに広げる */
-    width: 100%;
-    
-    /* 【修正】入力欄単体で 450px を強制確保 */
-    /* 計算式: 14px × 25文字 = 350px。余裕を見て +100px */
-    min-width: 450px;
-    
-    padding: 6px 10px;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    
-    /* 念のためフォントサイズを明示（ブラウザ依存を防ぐ） */
-    font-size: 14px; 
-}
-
-/* 3. スマホ対応（画面幅600px以下） */
-@media (max-width: 600px) {
-    /* スマホでは固定幅を解除し、画面幅に合わせる */
-    .project-name-group {
-        width: 100%;
-    }
-    #projectNameInput {
-        min-width: 0; /* 強制幅を解除 */
-        width: 100%;
-    }
 }
