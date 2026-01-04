@@ -62,17 +62,6 @@ const DataManager = {
 const CELL_WIDTH = 28;
 const BASE_ROW_HEIGHT = 52;
 const SEGMENT_OFFSET_Y = 44;
-
-// 【対策 CWE-400】リソース枯渇(無限入力)防止のための制限設定
-// ユーザー要望に基づき調整済み
-const LIMITS = {
-    TEXT: 100,          // 項目名・ラベル（100文字）
-    MEMO: 5000,         // メモ欄（5000文字）
-    PROJECT_NAME: 50,   // 計画名（50文字）
-    TASKS_MAX: 500,     // タスク行数（500行）
-    SEGMENTS_MAX: 360   // 1タスクあたりのセグメント数（1年分想定で360個）
-};
-
 const now = new Date();
 const todayISO = dateToISO(now);
 const defaultStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -133,35 +122,46 @@ function dateToIndex(str) { return timelineDays.findIndex((d) => d.iso === str);
 function isSegmentSelected(taskId, segId) { return selectedSegments.some((s) => s.taskId === taskId && s.segId === segId); }
 function centerX(index) { return index * CELL_WIDTH + CELL_WIDTH / 2; }
 
-// 【対策 CWE-400】文字列切り詰めヘルパー
-function truncate(str, max) {
-    if (typeof str !== 'string') return "";
-    return str.length > max ? str.substring(0, max) : str;
-}
-
-// 【対策 CWE-20】日付形式チェック
-function isValidDateISO(str) {
-    return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(Date.parse(str));
-}
-
 // --- データ同期 & 保存 ---
 function syncDataModel() {
-    // 保存前に現在のDOMからデータを吸い上げる際も制限を適用
-    appData.tasks = taskObjects.map(t => ({
-        id: t.id,
-        label1: truncate(t.leftRowEl.children[1].firstElementChild.textContent, LIMITS.TEXT),
-        label2: truncate(t.leftRowEl.children[2].firstElementChild.textContent, LIMITS.TEXT),
-        label3: truncate(t.leftRowEl.children[3].firstElementChild.textContent, LIMITS.TEXT),
-        segments: t.segments.map(s => ({
-            ...s,
-            label: truncate(s.label, LIMITS.TEXT)
-        })),
-        isDone: t.isDone || false,
-        isHidden: t.isHidden || false
-    }));
-    
-    appData.memo = truncate(freeMemo.innerText, LIMITS.MEMO);
-    appData.projectName = truncate(projectNameInput.value, LIMITS.PROJECT_NAME);
+    appData.tasks = taskObjects.map(t => {
+        return {
+            id: t.id,
+            label1: t.leftRowEl.children[1].firstElementChild.textContent,
+            label2: t.leftRowEl.children[2].firstElementChild.textContent,
+            label3: t.leftRowEl.children[3].firstElementChild.textContent,
+            segments: t.segments,
+            isDone: t.isDone || false,
+            isHidden: t.isHidden || false
+        };
+    });
+    appData.memo = freeMemo.innerHTML;
+    appData.projectName = projectNameInput.value;
+}
+
+// 期間外のdailyValuesを削除する（選択解除時などの確定用）
+function pruneDailyValues(seg) {
+    if (!seg.dailyValues) return;
+    const start = seg.startDate;
+    const end = seg.endDate;
+
+    for (const iso of Object.keys(seg.dailyValues)) {
+        if (iso < start || iso > end) {
+            delete seg.dailyValues[iso];
+        }
+    }
+}
+
+function commitCurrentSelection() {
+    if (selectedSegments.length > 0) {
+        selectedSegments.forEach(sel => {
+            const t = taskObjects.find(t => t.id === sel.taskId);
+            if (t) {
+                const s = t.segments.find(seg => seg.id === sel.segId);
+                if (s) pruneDailyValues(s);
+            }
+        });
+    }
 }
 
 function triggerSave() {
@@ -171,18 +171,10 @@ function triggerSave() {
 }
 
 projectNameInput.addEventListener("input", () => {
-    // UI上での即時制限
-    if (projectNameInput.value.length > LIMITS.PROJECT_NAME) {
-        projectNameInput.value = projectNameInput.value.substring(0, LIMITS.PROJECT_NAME);
-    }
     document.title = projectNameInput.value + " | 工程表";
     triggerSave();
 });
-freeMemo.addEventListener("input", () => {
-    // メモ欄は長いため、入力中の厳密な制限はUXを損なう可能性があるため
-    // 厳密なカットは保存時(syncDataModel)に任せるが、念のため長すぎる場合は警告などを出す実装も可能
-    triggerSave();
-});
+freeMemo.addEventListener("input", triggerSave);
 
 // --- 初期化 ---
 async function initializeApp() {
@@ -197,99 +189,22 @@ async function initializeApp() {
         scrollToToday();
         document.title = appData.projectName + " | 工程表";
     }
-    setupPasteSanitization();
     setupControlEvents();
 }
 
 function restoreFromData(data) {
-    // 【対策 CWE-1321 & CWE-400】
-    // ホワイトリスト方式で、必要なデータのみを型チェック・長さ制限しながら復元
-    
-    if (!data || typeof data !== 'object') {
-        alert("データ形式が無効です。初期状態で開始します。");
-        return;
+    appData = data;
+    if (!data.settings.startDate) {
+        appData.settings.startDate = dateToISO(defaultStart);
+        appData.settings.endDate = dateToISO(defaultEnd);
     }
 
-    const safeSettings = {
-        startDate: isValidDateISO(data.settings?.startDate) ? data.settings.startDate : dateToISO(defaultStart),
-        endDate: isValidDateISO(data.settings?.endDate) ? data.settings.endDate : dateToISO(defaultEnd),
-        holidays: Array.isArray(data.settings?.holidays) 
-            ? data.settings.holidays.filter(h => isValidDateISO(h)).slice(0, 3650) // 最大10年分程度に制限
-            : []
-    };
+    const restoredName = data.projectName || "標準の計画";
+    projectNameInput.value = restoredName;
+    document.title = restoredName + " | 工程表";
 
-    const safeProjectName = truncate(data.projectName || "標準の計画", LIMITS.PROJECT_NAME);
-    const safeMemo = truncate(data.memo || "", LIMITS.MEMO);
+    freeMemo.innerHTML = data.memo || "";
 
-    const safeTasks = [];
-    if (Array.isArray(data.tasks)) {
-        // タスク数の上限チェック
-        const taskCount = Math.min(data.tasks.length, LIMITS.TASKS_MAX);
-        
-        for (let i = 0; i < taskCount; i++) {
-            const t = data.tasks[i];
-            if (!t || typeof t !== 'object') continue;
-
-            const safeSegments = [];
-            if (Array.isArray(t.segments)) {
-                // セグメント数の上限チェック
-                const segCount = Math.min(t.segments.length, LIMITS.SEGMENTS_MAX);
-                for (let j = 0; j < segCount; j++) {
-                    const s = t.segments[j];
-                    if (!s) continue;
-                    
-                    // 日付の妥当性チェック
-                    if (!isValidDateISO(s.startDate) || !isValidDateISO(s.endDate)) continue;
-
-                    // 工数(dailyValues)のサニタイズ
-                    const safeDailyValues = {};
-                    if (s.dailyValues && typeof s.dailyValues === 'object') {
-                        Object.keys(s.dailyValues).forEach(k => {
-                            if (isValidDateISO(k)) {
-                                const val = parseFloat(s.dailyValues[k]);
-                                if (!isNaN(val) && val >= 0 && val <= 24) { // 妥当な工数範囲
-                                    safeDailyValues[k] = val;
-                                }
-                            }
-                        });
-                    }
-
-                    safeSegments.push({
-                        id: String(s.id || Math.random()), 
-                        startDate: s.startDate,
-                        endDate: s.endDate,
-                        type: s.type === 'point' ? 'point' : 'range',
-                        label: truncate(s.label, LIMITS.TEXT),
-                        progressEndDate: isValidDateISO(s.progressEndDate) ? s.progressEndDate : null,
-                        dailyValues: safeDailyValues
-                    });
-                }
-            }
-
-            safeTasks.push({
-                id: String(t.id || "task_" + Math.random()),
-                label1: truncate(t.label1, LIMITS.TEXT),
-                label2: truncate(t.label2, LIMITS.TEXT),
-                label3: truncate(t.label3, LIMITS.TEXT),
-                segments: safeSegments,
-                isDone: !!t.isDone,
-                isHidden: !!t.isHidden
-            });
-        }
-    }
-
-    appData = {
-        projectName: safeProjectName,
-        settings: safeSettings,
-        tasks: safeTasks,
-        memo: safeMemo
-    };
-
-    projectNameInput.value = appData.projectName;
-    document.title = appData.projectName + " | 工程表";
-    freeMemo.innerText = appData.memo; // XSS対策
-
-    // DOM再構築
     leftRowsContainer.innerHTML = "";
     rowsContainer.innerHTML = "";
     taskObjects = [];
@@ -297,7 +212,7 @@ function restoreFromData(data) {
     buildTimeline();
     buildHeader();
 
-    if (appData.tasks.length > 0) {
+    if (appData.tasks && appData.tasks.length > 0) {
         appData.tasks.forEach(tData => addTaskRow(tData));
     } else {
         addTaskRow();
@@ -320,9 +235,7 @@ function buildTimeline() {
     const endDt = isoToDate(appData.settings.endDate);
     const curr = new Date(startDt);
 
-    // 【対策 CWE-400】ループ暴走防止 (約10年分)
-    let safeGuard = 0;
-    while (curr <= endDt && safeGuard < 3660) {
+    while (curr <= endDt) {
         const iso = dateToISO(curr);
         const dow = curr.getDay();
         timelineDays.push({
@@ -338,7 +251,6 @@ function buildTimeline() {
             isToday: iso === todayISO
         });
         curr.setDate(curr.getDate() + 1);
-        safeGuard++;
     }
     updateRangeLabel();
 }
@@ -354,24 +266,13 @@ function buildHeader() {
     headerRow.innerHTML = "";
     const total = timelineDays.length;
     headerRow.style.gridTemplateColumns = `repeat(${total}, ${CELL_WIDTH}px)`;
-    
     timelineDays.forEach((d) => {
         const c = document.createElement("div");
         c.className = "header-day";
         if (d.isWeekend) c.classList.add("weekend");
         if (d.isHoliday) c.classList.add("holiday");
         if (d.isToday) c.classList.add("today");
-        
-        const numDiv = document.createElement("div");
-        numDiv.className = "header-day-num";
-        numDiv.textContent = `${d.month}/${d.day}`;
-        
-        const weekDiv = document.createElement("div");
-        weekDiv.className = "header-day-week";
-        weekDiv.textContent = WEEKDAYS[d.dow];
-        
-        c.appendChild(numDiv);
-        c.appendChild(weekDiv);
+        c.innerHTML = `<div class="header-day-num">${d.month}/${d.day}</div><div class="header-day-week">${WEEKDAYS[d.dow]}</div>`;
         headerRow.appendChild(c);
     });
 
@@ -422,12 +323,6 @@ function refreshRowsDOM() {
 }
 
 function addTaskRow(initialData = null) {
-    // 【対策】タスク数上限チェック
-    if (!initialData && taskObjects.length >= LIMITS.TASKS_MAX) {
-        alert("タスク数の上限に達しました。");
-        return;
-    }
-
     const id = initialData ? initialData.id : "task_" + Date.now() + "_" + Math.random().toString(36).slice(2);
     const total = timelineDays.length;
 
@@ -709,8 +604,14 @@ function calculateTotals() {
         task.segments.forEach(seg => {
             if (seg.dailyValues) {
                 for (const [iso, val] of Object.entries(seg.dailyValues)) {
+                    // セグメントの現在期間外にあるデータは無視
+                    if (iso < seg.startDate || iso > seg.endDate) continue;
+
                     if (totals.hasOwnProperty(iso)) {
-                        totals[iso] += parseFloat(val) || 0;
+                        const num = parseFloat(val);
+                        if (!isNaN(num)) {
+                            totals[iso] += num;
+                        }
                     }
                 }
             }
@@ -724,11 +625,69 @@ function calculateTotals() {
         let val = totals[iso];
 
         if (val > 0) {
-            if (val > 99.9) val = 99.9;
+            if (val > 99.9) val = 99.9; // 上限キャップ(整数2桁+小数1位)
             cell.textContent = (val % 1 === 0) ? val : val.toFixed(1);
         } else {
             cell.textContent = "";
         }
+    }
+}
+
+// 【追加】バイト数カウント（半角1, 全角2）
+function getByteLength(str) {
+    let len = 0;
+    for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        if ((c >= 0x0 && c <= 0x7f) || (c >= 0xff61 && c <= 0xff9f)) {
+            len += 1;
+        } else {
+            len += 2;
+        }
+    }
+    return len;
+}
+
+// 【修正】入力値ハンドリング
+function handleDailyValueClick(e, task, seg, iso) {
+    e.stopPropagation();
+    if (currentMode !== "plan") return;
+
+    const curVal = (seg.dailyValues && seg.dailyValues[iso]) || "";
+    let input = prompt("数字(0.0～9.9) または 文字(全角2文字/半角4文字まで):", curVal);
+
+    if (input !== null) {
+        input = input.trim();
+        if (input === "") {
+            if (seg.dailyValues) delete seg.dailyValues[iso];
+        } else {
+            const strVal = input;
+
+            // 1. 数値要件チェック: 0～9 の整数1桁、または 0.0～9.9
+            // 正規表現: ^\d(\.\d)?$  -> 数字1つ + オプションで(.と数字1つ)
+            const isValidNumberFormat = /^\d(\.\d)?$/.test(strVal);
+
+            if (isValidNumberFormat) {
+                // 数値としてOK
+                if (!seg.dailyValues) seg.dailyValues = {};
+                seg.dailyValues[iso] = strVal;
+            } else if (!isNaN(parseFloat(strVal)) && /^[0-9.]+$/.test(strVal)) {
+                // 数値として認識できるが、要件（1桁 or 1桁.1桁）を満たしていないもの (例: 10, 1.23, .5)
+                alert("数値は整数1桁・小数第1位まで（例: 0.0～9.9）にしてください。");
+                return;
+            } else {
+                // 数値ではない（文字列） -> 文字数チェック
+                const len = getByteLength(strVal);
+                if (len <= 4) {
+                    if (!seg.dailyValues) seg.dailyValues = {};
+                    seg.dailyValues[iso] = strVal;
+                } else {
+                    alert("文字列は全角2文字（半角4文字）以内で入力してください。");
+                    return;
+                }
+            }
+        }
+        renderAllSegments();
+        triggerSave();
     }
 }
 
@@ -763,32 +722,18 @@ function drawRangeSegment(task, seg, sIdx, eIdx, topPx) {
             valDiv.style.top = (topPx + 8) + "px";
 
             if (seg.dailyValues && seg.dailyValues[iso] != null) {
-                const v = parseFloat(seg.dailyValues[iso]);
-                valDiv.textContent = (v % 1 === 0) ? v : v.toFixed(1);
+                const rawV = seg.dailyValues[iso];
+                const v = parseFloat(rawV);
+                // 数値としてパースでき、かつ入力値が数値形式(0.0-9.9)であれば数値表示(1.0などは1に)
+                // 文字列ならそのまま表示
+                if (!isNaN(v) && /^\d(\.\d)?$/.test(rawV)) {
+                    valDiv.textContent = (v % 1 === 0) ? v : v.toFixed(1);
+                } else {
+                    valDiv.textContent = rawV;
+                }
             }
 
-            valDiv.addEventListener("click", (e) => {
-                e.stopPropagation();
-                if (currentMode !== "plan") return;
-
-                const curVal = (seg.dailyValues && seg.dailyValues[iso]) || "";
-                let input = prompt("工数を入力 (0-10)", curVal);
-                if (input !== null) {
-                    input = input.trim();
-                    if (input === "") {
-                        if (seg.dailyValues) delete seg.dailyValues[iso];
-                    } else {
-                        let num = parseFloat(input);
-                        if (isNaN(num)) return;
-                        if (num < 0) num = 0;
-                        if (num > 10) num = 10;
-                        if (!seg.dailyValues) seg.dailyValues = {};
-                        seg.dailyValues[iso] = num;
-                    }
-                    renderAllSegments();
-                    triggerSave();
-                }
-            });
+            valDiv.addEventListener("click", (e) => handleDailyValueClick(e, task, seg, iso));
             task.segLayerEl.appendChild(valDiv);
         }
     }
@@ -895,30 +840,15 @@ function drawPointSegment(task, seg, idx, topPx) {
     valDiv.style.left = c + "px";
     valDiv.style.top = (topPx + 8) + "px";
     if (seg.dailyValues && seg.dailyValues[iso] != null) {
-        const v = parseFloat(seg.dailyValues[iso]);
-        valDiv.textContent = (v % 1 === 0) ? v : v.toFixed(1);
-    }
-    valDiv.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (currentMode !== "plan") return;
-        const curVal = (seg.dailyValues && seg.dailyValues[iso]) || "";
-        let input = prompt("工数を入力 (0-10)", curVal);
-        if (input !== null) {
-            input = input.trim();
-            if (input === "") {
-                if (seg.dailyValues) delete seg.dailyValues[iso];
-            } else {
-                let num = parseFloat(input);
-                if (isNaN(num)) return;
-                if (num < 0) num = 0;
-                if (num > 10) num = 10;
-                if (!seg.dailyValues) seg.dailyValues = {};
-                seg.dailyValues[iso] = num;
-            }
-            renderAllSegments();
-            triggerSave();
+        const rawV = seg.dailyValues[iso];
+        const v = parseFloat(rawV);
+        if (!isNaN(v) && /^\d(\.\d)?$/.test(rawV)) {
+            valDiv.textContent = (v % 1 === 0) ? v : v.toFixed(1);
+        } else {
+            valDiv.textContent = rawV;
         }
-    });
+    }
+    valDiv.addEventListener("click", (e) => handleDailyValueClick(e, task, seg, iso));
     task.segLayerEl.appendChild(valDiv);
 
     if (seg.label) {
@@ -964,10 +894,9 @@ function addSegEvents(el, task, seg) {
 
 function editSegmentLabel(task, segId) {
     const seg = task.segments.find(s => s.id === segId);
-    // promptも長い入力の攻撃対象になりうるためカット
     const nl = window.prompt("ラベル:", seg.label || "");
     if (nl === null) return;
-    seg.label = truncate(nl.trim(), LIMITS.TEXT);
+    seg.label = nl.trim();
     renderAllSegments(); triggerSave();
 }
 
@@ -980,8 +909,10 @@ function deleteSegment(task, segId) {
 
 function handleSegClick(task, seg, addMode) {
     if (!seg.id || currentMode !== "plan") return;
-    if (!addMode) selectedSegments = [{ taskId: task.id, segId: seg.id }];
-    else {
+    if (!addMode) {
+        commitCurrentSelection();
+        selectedSegments = [{ taskId: task.id, segId: seg.id }];
+    } else {
         const idx = selectedSegments.findIndex(s => s.taskId === task.id && s.segId === seg.id);
         if (idx >= 0) selectedSegments.splice(idx, 1);
         else selectedSegments.push({ taskId: task.id, segId: seg.id });
@@ -1028,6 +959,9 @@ function handleCellClick(task, dayIndex) {
 
     // 2. Plan Mode
     if (activeTaskId !== task.id) {
+        commitCurrentSelection();
+        selectedSegments = [];
+
         activeTaskId = task.id;
         taskObjects.forEach(t => { t.pendingStartDate = null; t.pendingStartIndex = null; });
         updateActiveRowHighlight();
@@ -1035,6 +969,10 @@ function handleCellClick(task, dayIndex) {
 
     // 最初のクリック（始点登録）
     if (task.pendingStartDate == null) {
+        commitCurrentSelection();
+        selectedSegments = [];
+        renderAllSegments();
+
         task.pendingStartDate = dateStr; task.pendingStartIndex = dayIndex;
         renderAllSegments(); return;
     }
@@ -1045,15 +983,6 @@ function handleCellClick(task, dayIndex) {
 
     const pendingStartIdx = dateToIndex(sStr);
     const pendingEndIdx = dateToIndex(eStr);
-    
-    // 【対策 CWE-400】セグメント数上限チェック
-    if (task.segments.length >= LIMITS.SEGMENTS_MAX) {
-        alert("1行あたりの区間数が上限に達しました。");
-        task.pendingStartDate = null;
-        task.pendingStartIndex = null;
-        renderAllSegments();
-        return;
-    }
 
     for (let i = pendingStartIdx; i <= pendingEndIdx; i++) {
         const checkIso = timelineDays[i].iso;
@@ -1073,8 +1002,7 @@ function handleCellClick(task, dayIndex) {
         }
     }
 
-    const labelRaw = prompt("区間ラベル（任意）", "") || "";
-    const label = truncate(labelRaw, LIMITS.TEXT); // 入力制限
+    const label = prompt("区間ラベル（任意）", "") || "";
     const type = sStr === eStr ? "point" : "range";
     const segId = "seg_" + Math.random().toString(36).slice(2);
     task.segments.push({ id: segId, startDate: sStr, endDate: eStr, type, label, progressEndDate: null, dailyValues: {} });
@@ -1092,15 +1020,22 @@ function setupRowInteraction(task) {
         handleCellClick(task, idx);
     });
     task.leftRowEl.addEventListener("click", () => {
+        // 行見出しクリックで行切り替え
+        if (activeTaskId !== task.id) {
+            commitCurrentSelection();
+            selectedSegments = [];
+        }
         activeTaskId = task.id;
         taskObjects.forEach(t => { t.pendingStartDate = null; t.pendingStartIndex = null; });
         updateActiveRowHighlight();
+        renderAllSegments();
     });
 }
 
 document.getElementById("downloadBtn").addEventListener("click", () => {
+    commitCurrentSelection();
+
     syncDataModel();
-    // ファイル名サニタイズ（OSコマンドインジェクション等はここで発生しないが、使い勝手として特殊文字排除）
     const rawProjectName = appData.projectName.replace(/[^\w\u3040-\u30ff\u30a0-\u30ff\u30fc\u4e00-\u9faf\uff10-\uff19]+/g, '_');
     const sanitizedName = rawProjectName.replace(/_+/g, '_').replace(/^_|_$/g, '');
     const timestamp = formatTimestamp(new Date());
@@ -1117,31 +1052,14 @@ const fileInput = document.getElementById("fileInput");
 document.getElementById("uploadBtn").addEventListener("click", () => { fileInput.click(); });
 fileInput.addEventListener("change", (e) => {
     const file = e.target.files[0]; if (!file) return;
-
-    // 【対策 CWE-434】ファイルタイプチェック
-    if (!file.name.toLowerCase().endsWith(".json")) {
-        alert("JSONファイルのみ読み込めます。");
-        fileInput.value = "";
-        return;
-    }
-    if (file.type && file.type !== "application/json") {
-        alert("ファイル形式が正しくありません。");
-        fileInput.value = "";
-        return;
-    }
-
     const reader = new FileReader();
     reader.onload = (evt) => {
         try {
             const data = JSON.parse(evt.target.result);
-            // 【対策 CWE-20】必須プロパティの存在チェック
-            if (!data || typeof data !== 'object' || !Array.isArray(data.tasks)) {
-                throw new Error("無効なファイル形式です");
-            }
             if (confirm("データを上書きして読み込みますか？")) {
                 restoreFromData(data); triggerSave(); alert("読み込み完了");
             }
-        } catch (err) { alert("読み込み失敗: ファイルが破損しているか形式が異なります。"); }
+        } catch (err) { alert("読み込み失敗"); }
         fileInput.value = "";
     };
     reader.readAsText(file);
@@ -1165,23 +1083,10 @@ function setupControlEvents() {
 
     document.getElementById("settingsSave").addEventListener("click", () => {
         if (!confirm("期間を変更しますか？")) return;
-        const newStart = document.getElementById("settingsStartDate").value;
-        const newEnd = document.getElementById("settingsEndDate").value;
-        
-        // 【対策 CWE-20】日付妥当性チェック
-        if (!isValidDateISO(newStart) || !isValidDateISO(newEnd)) {
-            alert("日付形式が正しくありません。");
-            return;
-        }
-
-        appData.settings.startDate = newStart;
-        appData.settings.endDate = newEnd;
-        
+        appData.settings.startDate = document.getElementById("settingsStartDate").value;
+        appData.settings.endDate = document.getElementById("settingsEndDate").value;
         const hText = document.getElementById("settingsHolidays").value.trim();
-        appData.settings.holidays = hText 
-            ? hText.split(",").map(s => s.trim()).filter(s => isValidDateISO(s)) 
-            : [];
-            
+        appData.settings.holidays = hText ? hText.split(",").map(s => s.trim()).filter(s => s) : [];
         settingsPanel.classList.add("settings-hidden");
         restoreFromData(appData); triggerSave();
     });
@@ -1198,42 +1103,99 @@ function setupControlEvents() {
         }
     });
 
-    document.getElementById("segMinus1d").addEventListener("click", () => modifySelected(s => { if (!s.progressEndDate) { s.startDate = shiftDateStr(s.startDate, -1); s.endDate = shiftDateStr(s.endDate, -1); } }));
-    document.getElementById("segPlus1d").addEventListener("click", () => modifySelected(s => { if (!s.progressEndDate) { s.startDate = shiftDateStr(s.startDate, 1); s.endDate = shiftDateStr(s.endDate, 1); } }));
-    document.getElementById("segMinus1w").addEventListener("click", () => modifySelected(s => { if (!s.progressEndDate) { s.startDate = shiftDateStr(s.startDate, -7); s.endDate = shiftDateStr(s.endDate, -7); } }));
-    document.getElementById("segPlus1w").addEventListener("click", () => modifySelected(s => { if (!s.progressEndDate) { s.startDate = shiftDateStr(s.startDate, 7); s.endDate = shiftDateStr(s.endDate, 7); } }));
-    document.getElementById("segStartMinus1d").addEventListener("click", () => modifySelected(s => { if (s.type === 'range' && !s.progressEndDate) s.startDate = shiftDateStr(s.startDate, -1); }));
-    document.getElementById("segStartPlus1d").addEventListener("click", () => modifySelected(s => { if (s.type === 'range' && !s.progressEndDate) s.startDate = shiftDateStr(s.startDate, 1); }));
-    document.getElementById("segEndMinus1d").addEventListener("click", () => modifySelected(s => { if (s.type === 'range') { const next = shiftDateStr(s.endDate, -1); if (!s.progressEndDate || next >= s.progressEndDate) s.endDate = next; } }));
-    document.getElementById("segEndPlus1d").addEventListener("click", () => modifySelected(s => { if (s.type === 'range') s.endDate = shiftDateStr(s.endDate, 1); }));
+    const shiftDailyValues = (dailyValues, delta) => {
+        if (!dailyValues) return {};
+        const newVals = {};
+        Object.keys(dailyValues).forEach(iso => {
+            const newIso = shiftDateStr(iso, delta);
+            newVals[newIso] = dailyValues[iso];
+        });
+        return newVals;
+    };
+
+    // --- 移動・伸縮操作の定義 ---
+
+    // 1. 全体移動 (データも一緒に動く)
+    const moveSegment = (s, delta) => {
+        if (s.progressEndDate) return;
+        s.startDate = shiftDateStr(s.startDate, delta);
+        s.endDate = shiftDateStr(s.endDate, delta);
+        s.dailyValues = shiftDailyValues(s.dailyValues, delta);
+    };
+
+    // 2. 開始点の移動 (データは動かさない＝伸縮)
+    const moveStart = (s, delta) => {
+        if (s.type === 'range' && !s.progressEndDate) {
+            const newStart = shiftDateStr(s.startDate, delta);
+            if (newStart > s.endDate) return;
+            s.startDate = newStart;
+        }
+    };
+
+    // 3. 終了点の移動 (データは動かさない＝伸縮)
+    const moveEnd = (s, delta) => {
+        if (s.type === 'range') {
+            const newEnd = shiftDateStr(s.endDate, delta);
+            if (newEnd < s.startDate) return;
+            if (s.progressEndDate && newEnd < s.progressEndDate) {
+                if (newEnd < s.progressEndDate) return;
+            }
+            s.endDate = newEnd;
+        }
+    };
+
+    document.getElementById("segMinus1d").addEventListener("click", () => modifySelected(s => moveSegment(s, -1)));
+    document.getElementById("segPlus1d").addEventListener("click", () => modifySelected(s => moveSegment(s, 1)));
+    document.getElementById("segMinus1w").addEventListener("click", () => modifySelected(s => moveSegment(s, -7)));
+    document.getElementById("segPlus1w").addEventListener("click", () => modifySelected(s => moveSegment(s, 7)));
+
+    document.getElementById("segStartMinus1d").addEventListener("click", () => modifySelected(s => moveStart(s, -1)));
+    document.getElementById("segStartPlus1d").addEventListener("click", () => modifySelected(s => moveStart(s, 1)));
+
+    document.getElementById("segEndMinus1d").addEventListener("click", () => modifySelected(s => moveEnd(s, -1)));
+    document.getElementById("segEndPlus1d").addEventListener("click", () => modifySelected(s => moveEnd(s, 1)));
 
     document.getElementById("rowMinus1d").addEventListener("click", () => {
         if (!activeTaskId) return;
         const t = taskObjects.find(t => t.id === activeTaskId);
-        t.segments.forEach(s => { if (!s.progressEndDate) { s.startDate = shiftDateStr(s.startDate, -1); s.endDate = shiftDateStr(s.endDate, -1); } });
+        t.segments.forEach(s => moveSegment(s, -1));
         renderAllSegments(); triggerSave();
     });
     document.getElementById("rowPlus1d").addEventListener("click", () => {
         if (!activeTaskId) return;
         const t = taskObjects.find(t => t.id === activeTaskId);
-        t.segments.forEach(s => { if (!s.progressEndDate) { s.startDate = shiftDateStr(s.startDate, 1); s.endDate = shiftDateStr(s.endDate, 1); } });
+        t.segments.forEach(s => moveSegment(s, 1));
         renderAllSegments(); triggerSave();
     });
 
-    document.getElementById("modePlan").addEventListener("click", () => { currentMode = "plan"; document.getElementById("modePlan").classList.add("mode-active"); document.getElementById("modeProgress").classList.remove("mode-active"); taskObjects.forEach(t => t.segLayerEl.classList.remove("no-pointer")); activeProgressSegmentId = null; renderAllSegments(); });
-    document.getElementById("modeProgress").addEventListener("click", () => { currentMode = "progress"; document.getElementById("modeProgress").classList.add("mode-active"); document.getElementById("modePlan").classList.remove("mode-active"); taskObjects.forEach(t => { t.segLayerEl.classList.add("no-pointer"); t.pendingStartDate = null; }); activeProgressSegmentId = null; renderAllSegments(); });
-    document.getElementById("addRowBtn").addEventListener("click", () => addTaskRow());
-}
-
-// 【対策 CWE-79 (セルフXSS)】ペースト時にプレーンテキストのみを許可する
-function setupPasteSanitization() {
-    document.addEventListener('paste', (e) => {
-        if (e.target.isContentEditable) {
-            e.preventDefault();
-            const text = (e.clipboardData || window.clipboardData).getData('text');
-            document.execCommand('insertText', false, text);
-        }
+    document.getElementById("modePlan").addEventListener("click", () => {
+        currentMode = "plan";
+        document.getElementById("modePlan").classList.add("mode-active");
+        document.getElementById("modeProgress").classList.remove("mode-active");
+        taskObjects.forEach(t => t.segLayerEl.classList.remove("no-pointer"));
+        activeProgressSegmentId = null;
+        renderAllSegments();
     });
+
+    document.getElementById("modeProgress").addEventListener("click", () => {
+        currentMode = "progress";
+        document.getElementById("modeProgress").classList.add("mode-active");
+        document.getElementById("modePlan").classList.remove("mode-active");
+        taskObjects.forEach(t => {
+            t.segLayerEl.classList.add("no-pointer");
+            t.pendingStartDate = null;
+        });
+
+        if (selectedSegments.length > 0) {
+            activeProgressSegmentId = selectedSegments[0].segId;
+        } else {
+            activeProgressSegmentId = null;
+        }
+
+        renderAllSegments();
+    });
+
+    document.getElementById("addRowBtn").addEventListener("click", () => addTaskRow());
 }
 
 function createBlankAppData() {
@@ -1252,7 +1214,6 @@ function modifySelected(modifierFunc) {
         if (task) {
             const seg = task.segments.find(s => s.id === sel.segId);
             if (seg) {
-                if (seg.progressEndDate && seg.progressEndDate >= seg.endDate) return;
                 modifierFunc(seg);
             }
         }
